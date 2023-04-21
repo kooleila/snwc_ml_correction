@@ -615,7 +615,7 @@ def modify(data, param):
 # Calculate ml model point forecast
 def ml_forecast(ml_data, param):
     # Load model from S3, I'm unable to make it happen tough...
-    filen = "/data/hietal/"
+    filen = "/snwc_ml_correction/"  #"/data/hietal/"
     if param == "temperature":
         mlname = "T2m"
     elif param == "windspeed":
