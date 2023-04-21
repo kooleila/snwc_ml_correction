@@ -17,11 +17,13 @@ from sklearn.ensemble import GradientBoostingRegressor
 import joblib
 import copy
 import numpy.ma as ma
+import warnings
+warnings.filterwarnings('ignore')
 
 def parse_command_line():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--topography_data", action="store", type=str, required=False)
-    parser.add_argument("--landseacover_data", action="store", type=str, required=False)
+    parser.add_argument("--topography_data", action="store", type=str, required=True)
+    parser.add_argument("--landseacover_data", action="store", type=str, required=True)
     parser.add_argument("--parameter", action="store", type=str, required=True)
     parser.add_argument("--wg_data", action="store", type=str, required=True)
     parser.add_argument("--ppa_data", action="store", type=str, required=True)
@@ -39,7 +41,7 @@ def parse_command_line():
 
     args = parser.parse_args()
 
-    allowed_params = ["temperature", "humidity", "windspeed","gust","flash"]
+    allowed_params = ["temperature", "humidity", "windspeed", "gust"]
     if args.parameter not in allowed_params:
 
         print("Error: parameter must be one of: {}".format(allowed_params))
@@ -113,7 +115,7 @@ def read_file_from_s3(grib_file):
     uri = "simplecache::{}".format(grib_file)
 
     return fsspec.open_local(
-        uri, s3={"anon": True, "client_kwargs": {"endpoint_url": "https://lake.fmi.fi"}}
+        uri, s3={"anon": True, "client_kwargs": {"endpoint_url": "https://routines-data.lake.fmi.fi"}}
     )
 
 
@@ -122,8 +124,6 @@ def read_grib(gribfile, read_coordinates=False):
     List of coordinates is only returned on request, as it's quite
     slow to generate.
     """
-    #print(gribfile)
-    #print(len(gribfile))
     forecasttime = []
     values = []
 
@@ -133,7 +133,7 @@ def read_grib(gribfile, read_coordinates=False):
         wrk_gribfile = read_file_from_s3(gribfile)
 
     with open(wrk_gribfile) as fp:
-        print("Reading {}".format(gribfile))
+        # print("Reading {}".format(gribfile))
 
         while True:
             gh = ecc.codes_grib_new_from_file(fp)
@@ -156,8 +156,6 @@ def read_grib(gribfile, read_coordinates=False):
             tempvals = ecc.codes_get_values(gh).reshape(nj, ni)
             values.append(tempvals)
 
-            #if read_coordinates == False:
-            #    return None, None, values, analysistime, forecasttime
             if read_coordinates:
                 projstr = get_projstr(gh)
 
@@ -178,7 +176,6 @@ def read_grib(gribfile, read_coordinates=False):
                         lons.append(lon)
                         lats.append(lat)
 
-        #print(read_coordinates)
 
         if read_coordinates == False and len(values) == 1:
             return None, None, np.asarray(values).reshape(nj,ni), analysistime, forecasttime
@@ -196,7 +193,7 @@ def read_grib(gribfile, read_coordinates=False):
 
 def read_grid(args):
     """Top function to read "all" gridded data"""
-    # Define the grib-file used as background or "parameter data"
+    # Define the grib-file used as backgroun/"parameter_data"
     if args.parameter == "temperature":
         parameter_data = args.t2_data
     elif args.parameter == "windspeed":
@@ -211,19 +208,21 @@ def read_grid(args):
     _, _, topo, _, _ = read_grib(args.topography_data, False)
     _, _, lc, _, _ = read_grib(args.landseacover_data, False)
 
-    grid = gridpp.Grid(lats, lons, topo, lc) # added LSM (lc)
+    # modify  geopotential to height and use just the first grib message, since the topo & lc fields are static
+    topo = topo/9.81
+    topo = topo[0]
+    lc = lc[0]
+
+    if args.parameter == "temperature":
+        vals = vals - 273.15
+    elif args.parameter == "humidity":
+        vals = vals*100
+
+    grid = gridpp.Grid(lats, lons, topo, lc)
     return grid, lons, lats, vals, analysistime, forecasttime, lc, topo
 
 def read_ml_grid(args):
-    print(args.parameter)
-    """
-    if args.parameter == "temperature":
-        ws, rh, q2, cl, ps = read_ml_grid(args)
-    else if args.parameter == "humidity":
-        t2, ws, q2, cl, ps = read_ml_grid(args)
-    else if args.parameter == "windspeed":
-        t2, wg, cl, ps, wd = read_ml_grid(args) 
-    """
+
     _, _, ws, _, _ = read_grib(args.ws_data, False)
     _, _, rh, _, _ = read_grib(args.rh_data, False)
     _, _, q2, _, _ = read_grib(args.q2_data, False)
@@ -233,110 +232,82 @@ def read_ml_grid(args):
     _, _, wg, _, _ = read_grib(args.wg_data, False)
     _, _, wd, _, _ = read_grib(args.wd_data, False)
 
+    # change parameter units:
+    rh = rh * 100
+    t2 = t2 -273.15
+    ps = ps/100
+    cl = np.around(cl/0.125,0)
+
     return ws, rh, t2, wg, cl, ps, wd, q2
 
-"""
-    if args.parameter == "temperature":
-        _, _, ws, _, _ = read_grib(args.ws_data, False)
-        _, _, rh, _, _ = read_grib(args.rh_data, False)
-        _, _, q2, _, _ = read_grib(args.q2_data, False)
-        _, _, cl, _, _ = read_grib(args.nl_data, False)
-        _, _, ps, _, _ = read_grib(args.ppa_data, False)
-        return ws, rh, q2, cl, ps
-    elif args.parameter == "humidity":
-        _, _, t2, _, _ = read_grib(args.t2_data, False)
-        _, _, ws, _, _ = read_grib(args.ws_data, False)
-        _, _, q2, _, _ = read_grib(args.q2_data, False)
-        _, _, cl, _, _ = read_grib(args.nl_data, False)
-        _, _, ps, _, _ = read_grib(args.ppa_data, False)
-        return t2, ws, q2, cl, ps
-    elif args.parameter == "windspeed":
-        _, _, t2, _, _ = read_grib(args.t2_data, False)
-        _, _, wg, _, _ = read_grib(args.wg_data, False)
-        _, _, cl, _, _ = read_grib(args.nl_data, False)
-        _, _, ps, _, _ = read_grib(args.ppa_data, False)
-        _, _, wd, _, _ = read_grib(args.wd_data, False)
-        return t2, wg, cl, ps, wd
-"""
-
-def read_conventional_obs(args, obstime):
+def read_conventional_obs(args, fcstime, mnwc):
     parameter = args.parameter
+    # read observations for "analysis time" == leadtime 1
+    obstime = fcstime[1]
+    #print("Observations are from time:", obstime)
 
     timestr = obstime.strftime("%Y%m%d%H%M%S")
     trad_obs = []
 
+    # define obs parameter names used in observation database, for ws the potential ws values are used for Finland 
+    if parameter == "temperature":
+        obs_parameter = "TA_PT1M_AVG"
+    elif parameter == "windspeed":
+        obs_parameter = "WSP_PT10M_AVG" # potential wind speed available for Finnish stations
+    elif parameter == "gust":
+        obs_parameter = "WG_PT1H_MAX"
+    elif parameter == "humidity":
+        obs_parameter = "RH_PT1M_AVG"
+
     # conventional obs are read from two distinct smartmet server producers
     # if read fails, abort program
-    if parameter == "flash":
-        producer = "flash"
-        param = "peak_current"
-        # define the time for flash obs, in this from the past 40mins
-        end_tstr = timestr
-        print(end_tstr)
-        start_time = obstime - pd.DateOffset(minutes=40)
-        start_tstr = start_time.strftime("%Y%m%d%H%M%S")
-        #testausta varten
-        start_tstr = 20220818203000
-        end_tstr = 20220818210000
-        print(start_tstr)
-        url = "http://smartmet.fmi.fi/timeseries?producer={}&tz=gmt&starttime={}&endtime={}&param=flash_id,longitude,latitude,utctime,altitude,{}&format=json".format(
-            producer, start_tstr, end_tstr, param
+
+    for producer in ["observations_fmi", "foreign"]:
+        if producer == "foreign" and parameter == "windspeed":
+            obs_parameter = "WS_PT10M_AVG"
+        url = "http://smartmet.fmi.fi/timeseries?producer={}&tz=gmt&precision=auto&starttime={}&endtime={}&param=fmisid,longitude,latitude,utctime,elevation,{}&format=json&keyword=snwc".format(
+            producer, timestr, timestr, obs_parameter
         )
-        #print(url)
+
         resp = requests.get(url)
-        trad_obs = resp.json()
-        #print(trad_obs)
-
-    elif parameter != "flash":
-        for producer in ["observations_fmi", "foreign"]:
-            url = "http://smartmet.fmi.fi/timeseries?producer={}&tz=gmt&precision=auto&starttime={}&endtime={}&param=fmisid,longitude,latitude,utctime,elevation,{}&format=json&keyword=snwc".format(
-                producer, timestr, timestr, parameter
-            )
-
-            resp = requests.get(url)
-
 
         if resp.status_code != 200:
-            print("Error")
+            print("Not able to connect Smartmet server for observations, original MNWC fields are saved")
+            write_grib(args, analysistime, fcstime, mnwc)
             sys.exit(1)
-
         trad_obs += resp.json()
 
+
     obs = pd.DataFrame(trad_obs)
-    #print(obs.head(5))
+    # rename observation column if WS, otherwise WS and WSP won't work
+    if parameter == "windspeed": # merge columns for WSP and WS
+       obs["WSP_PT10M_AVG"] = obs["WSP_PT10M_AVG"].fillna(obs["WS_PT10M_AVG"])
 
-    if parameter == "flash":
-        obs.rename(columns={"flash_id":"station_id", "peak_current":"flash","altitude":"elevation"}, inplace=True)
-        print(obs.head(5))
-        obs = obs.assign(flash=100)
-        obs = obs.assign(elevation=0)
+    obs = obs.rename(columns={"fmisid": "station_id"})
 
-
-    elif parameter != "flash":
-        obs = obs.rename(columns={"fmisid": "station_id"})
-    ####
-    print(obs.columns)
-    print(obs.head(5))
     count = len(trad_obs)
-
-    print("Got {} traditional obs stations".format(count))
+    print("Got {} traditional obs stations for time {}".format(count, obstime))
 
     if count == 0:
-        print("Unable to proceed")
+        print("Number of observations from Smartmet serve is 0, original MNWC fields are saved")
+        write_grib(args, analysistime, fcstime, mnwc)
         sys.exit(1)
 
+    print("min obs:",min(obs.iloc[:,5]))
+    print("max obs:",max(obs.iloc[:,5]))
     return obs
 
 
-def read_netatmo_obs(args, obstime):
+def read_netatmo_obs(args, fcstime):
+    # read observations for "analysis time" == leadtime 1
+    obstime = fcstime[1]
+
     url = "http://smartmet.fmi.fi/timeseries?producer=NetAtmo&tz=gmt&precision=auto&starttime={}&endtime={}&param=station_id,longitude,latitude,utctime,temperature&format=json&data_quality=1&keyword=snwc".format(
         (obstime - datetime.timedelta(minutes=10)).strftime("%Y%m%d%H%M%S"),
         obstime.strftime("%Y%m%d%H%M%S"),
     )
 
     resp = requests.get(url)
-
-    # print(url)
 
     crowd_obs = None
 
@@ -358,7 +329,7 @@ def read_netatmo_obs(args, obstime):
         # use digital elevation map data to interpolate elevation information
         # to all netatmo station points
 
-        print("Interpolating elevation to NetAtmo stations")
+        #print("Interpolating elevation to NetAtmo stations")
         dem = xr.open_rasterio(args.dem_data)
 
         # dem is projected to lambert, our obs data is in latlon
@@ -390,21 +361,24 @@ def read_netatmo_obs(args, obstime):
     return obs
 
 
-def read_obs(args, obstime, grid, lc):
+def read_obs(args, fcstime, grid, lc, mnwc):
     """Read observations from smartmet server"""
 
-    obs = read_conventional_obs(args, obstime)
+    # read observations for "analysis" time == leadtime 1
+    # obstime = fcstime[1]
+
+    obs = read_conventional_obs(args, fcstime, mnwc)
 
     # for temperature we also have netatmo stations
     # these are optional
-
+    """
     if args.parameter == "temperature":
-        netatmo = read_netatmo_obs(args, obstime)
+        netatmo = read_netatmo_obs(args, fcstime)
         if netatmo is not None:
             obs = pd.concat((obs, netatmo))
 
-        obs["temperature"] += 273.15
-
+        #obs["temperature"] += 273.15
+    """
     points1 = gridpp.Points(
         obs["latitude"].to_numpy(),
         obs["longitude"].to_numpy(),
@@ -418,16 +392,22 @@ def read_obs(args, obstime, grid, lc):
         obs["elevation"].to_numpy(),
         obs["lsm"].to_numpy(),
     )
-    # _, _, lc, _, _ = read_grib(args.landseacover_data, False)
-    #lsm = gridpp.nearest(grid, points, background)
-
 
     return points, obs
 
 
 def write_grib_message(fp, args, analysistime, forecasttime, data):
+    """
+    Because there's ~1h delay between the mnwc analysistime and when the data is available for the users,
+    the time-parameters for the output data is modified such that new analysistime is +1h and the mnwc data leadtimes are reduced by -1h
+    """
+    #print(analysistime)
+    new_atime = analysistime + datetime.timedelta(hours=1)
+    #print("new atime" , new_atime)
+    #print(forecasttime)
 
     if args.parameter == "humidity":
+        levelvalue = 2
         pcat = 1
         pnum = 1
     elif args.parameter == "temperature":
@@ -440,7 +420,7 @@ def write_grib_message(fp, args, analysistime, forecasttime, data):
         levelvalue = 10
     elif args.parameter == "gust":
         levelvalue = 10
-        pnum = 21
+        pnum = 22
         pcat = 2
     # Store different time steps as grib msgs
     for j in range(0,len(data)):
@@ -460,8 +440,8 @@ def write_grib_message(fp, args, analysistime, forecasttime, data):
         ecc.codes_set(h, "LoVInDegrees", 15)
         ecc.codes_set(h, "latitudeOfSouthernPoleInDegrees", -90)
         ecc.codes_set(h, "longitudeOfSouthernPoleInDegrees", 0)
-        ecc.codes_set(h, "dataDate", int(analysistime.strftime("%Y%m%d")))
-        ecc.codes_set(h, "dataTime", int(analysistime.strftime("%H%M")))
+        ecc.codes_set(h, "dataDate", int(new_atime.strftime("%Y%m%d")))
+        ecc.codes_set(h, "dataTime", int(new_atime.strftime("%H%M")))
         ecc.codes_set(
         h, "forecastTime", int((forecasttime[j] - analysistime).total_seconds() / 3600)
         )
@@ -513,12 +493,12 @@ def interpolate(grid, points, background, obs, args, lc):
     lc0 = np.logical_not(lc).astype(int)
 
     # Interpolate background data to observation points
-    # When bias is gridded == array of zeros
+    # When bias is gridded then background is zero so pobs is just array of zeros
     pobs = gridpp.nearest(grid, points, background)
 
     # Barnes structure function with horizontal decorrelation length 100km,
     # vertical decorrelation length 200m
-    structure = gridpp.BarnesStructure(30000, 200)
+    structure = gridpp.BarnesStructure(30000, 200, 1)
 
     # Include at most this many "observation points" when interpolating to a grid point
     max_points = 20
@@ -526,13 +506,10 @@ def interpolate(grid, points, background, obs, args, lc):
     # error variance ratio between observations and background
     # smaller values -> more trust to observations
     obs_to_background_variance_ratio = np.full(points.size(), 0.1)
-    print("OBS pituus", len(obs))
 
     for j in range(0,len(obs)):
         tmp_obs = obs[j]
-        print("j:",j)
-        #print(tmp_obs.head(5))
-        print("min",min(tmp_obs["biasc"]), "max:", max(tmp_obs["biasc"]))
+        print("min:",round(min(tmp_obs["biasc"]),0), "max:", round(max(tmp_obs["biasc"]),0))
 
     # perform optimal interpolation
         tmp_output = gridpp.optimal_interpolation(
@@ -547,15 +524,11 @@ def interpolate(grid, points, background, obs, args, lc):
         )
 
         # Mask based on LSM(lc) so that modifications over sea are zero
-        #print("size:", tmp_output.shape)
-        #print("min_op",np.amin(tmp_output), "max_op:", np.amax(tmp_output))
-        xo = ma.masked_array(tmp_output, mask = lc0)
-        tmp_output = xo.filled(0)
-        print("min_op",np.amin(tmp_output), "max_op:", np.amax(tmp_output))
+        ###xo = ma.masked_array(tmp_output, mask = lc0)
+        ###tmp_output = xo.filled(0)
+        print("min_op",round(np.amin(tmp_output),0), "max_op:", round(np.amax(tmp_output),0))
 
-        #print("min_op",min(tmp_output), "max_op:", max(tmp_output))
         output.append(tmp_output)
-        print(len(output))
     return output
 
 def train_data(args, points, obs, grid, topo, ws, rh, t2, wg, cl, ps, wd, q2, forecasttime):
@@ -595,6 +568,7 @@ def train_data(args, points, obs, grid, topo, ws, rh, t2, wg, cl, ps, wd, q2, fo
         tmp_data["leadtime"] = j
         tmp_data["forecasttime"] = forecasttime[j]
         data = data.append(tmp_data,ignore_index=True)
+        #data = pd.concat([data,tmp_data],join="inner")
         #print("tmp:",tmp_points)
     return data
 
@@ -655,8 +629,6 @@ def ml_forecast(ml_data, param):
 
     # Check that you have all the leadtimes (0-9)
     ajat = sorted(ml_data['leadtime'].unique().tolist())
-    print("AJAT:", ajat)
-    print("AJAT pituus:",len(ajat))
 
     # Leadtime 1 == obs analysis --> ML model not run for this
     lt1 = ml_data[ml_data['leadtime']==1]
@@ -666,151 +638,191 @@ def ml_forecast(ml_data, param):
     ml_data["biasc"] = regressor.predict(ml_data)
 
     if param == "temperature":
-        lt1["biasc"] = lt1["T1bias"] # lt1["T2M"] - lt1["T1bias"]
-        #ml_data["biasc"] = ml_data["T2M"] - bias
+        lt1["biasc"] = lt1["T1bias"]
     elif param == "windspeed":
-        lt1["biasc"] = lt1["WS1bias"]  #lt1["S10M"] - lt1["WS1bias"]
-        #ml_data["biasc"] = ml_data["S10M"] - bias
+        lt1["biasc"] = lt1["WS1bias"]
     elif param == "gust":
-        lt1["biasc"] = lt1["WG1bias"]  #lt1["GMAX"] - lt1["WG1bias"]
-        #ml_data["biasc"] = ml_data["GMAX"] - bias
+        lt1["biasc"] = lt1["WG1bias"]
     elif param == "humidity":
-        lt1["biasc"] = lt1["RH1bias"]  #lt1["RH2M"] - lt1["RH1bias"]
-        #ml_data["biasc"] = ml_data["RH2M"] - bias
+        lt1["biasc"] = lt1["RH1bias"]
 
     # Store data to list where each leadtime is it's own list, first leadtime is the obs analysis
     ml_results =  []
-    ml_results.append(lt1) #["biasc"]
+    ml_results.append(lt1)
 
     # Store bias correected forecast for leadtimes 2...x to list
     for j in range(1,len(ajat)):
-        print("juokseva aika:", ajat[j])
         lt_tmp = ml_data[ml_data['leadtime']==j+1]
-        ml_results.append(lt_tmp) #["biasc"])
+        ml_results.append(lt_tmp)
 
     return ml_results
 
 def main():
     args = parse_command_line()
 
-    print("Reading background data")
-
-    # read in the parameter which is processed
-    # background are the values of different timesteps
+    #print("Reading NWP data for", args.parameter )
+    st = time.time()
+    # read in the parameter which is forecasted
+    # background contains mnwc values for different leadtimes
     grid, lons, lats, background, analysistime, forecasttime, lc, topo = read_grid(args)
-    print("bglen", len(background))
     # create "zero" background for interpolating the bias
     background0 = copy.copy(background)
     background0[background0 != 0] = 0
-    #print(background0[0])
-    #print(background0[0].shape)
-    #exit()
 
     ws, rh, t2, wg, cl, ps, wd, q2 = read_ml_grid(args)
-    print("ws", len(ws))
-    """
-    if args.parameter == "temperature":
-        ws, rh, q2, cl, ps = read_ml_grid(args)
-    elif args.parameter == "humidity":
-        t2, ws, q2, cl, ps = read_ml_grid(args)
-    elif args.parameter == "windspeed":
-        t2, wg, cl, ps, wd = read_ml_grid(args)
-    """
+    et = time.time()
+    timedif = et-st
+    print('Reading NWP data for', args.parameter, 'takes:', round(timedif,0), 'seconds')
 
     # Read observations from smartmet server
     # Use correct time! == latest obs hour ==  forecasttime[1]
-    #print(forecasttime)
-    #print(forecasttime[1])
 
-    print("Reading observation data")
-    points, obs = read_obs(args, forecasttime[1], grid, lc)
-    #print("obs", obs.head(5))
+    points, obs = read_obs(args, forecasttime, grid, lc, background)
 
+    ot = time.time()
+    timedif = ot-et
+    print('Reading OBS data takes:', round(timedif,0) , 'seconds')
     # prepare dataframe for ML code, pandas df
     data = train_data(args, points, obs, grid, topo, ws, rh, t2, wg, cl, ps, wd, q2, forecasttime)
-    #print(data.head(5))
 
     # preprocess data
-    print("ARGS:", args)
     ml_data = modify(data, args.parameter)
 
     # Produce ML forecast for all the leadtimes
     ml_fcst = ml_forecast(ml_data, args.parameter)
-    #print("ml_fcst", ml_fcst)
-    print("ml_fxst length:", len(ml_fcst))
-
+    mlt = time.time()
+    timedif = mlt-ot
+    print('Producing ML forecasts takes:', round(timedif,0) , 'seconds')
     # Interpolate ML point forecasts for bias correction + 0h analysis time
-    output = interpolate(grid, points, background0[0], ml_fcst, args, lc)
-    print("len output:", len(output))
-    print(analysistime)
-    print(len(forecasttime))
-
+    diff = interpolate(grid, points, background0[0], ml_fcst, args, lc)
+    oit = time.time()
+    timedif = oit-mlt
+    print('Interpolating forecasts takes:', round(timedif,0) , 'seconds')
     # calculate the final bias corrected forecast fields: MNWC - bias_correction
-    for j in range(0,len(output)):
-        diff = background[j+1] - output[j]
+    # and convert parameter to T-K or RH-0TO1
+    output = []
+    for j in range(0,len(diff)):
+        tmp_output = background[j+1] - diff[j]
+        # Implement simple QC thresholds
+        if args.parameter == "humidity":
+            tmp_output = np.clip(tmp_output, 0, 100)
+            tmp_output = tmp_output/100
+        elif args.parameter == "windspeed" or args.parameter == "gust":
+            tmp_output = np.clip(tmp_output, 0, 50)
+        elif args.parameter == "temperature":
+            tmp_output = tmp_output + 273.15
+        output.append(tmp_output)
 
-    print(len(diff))
+
     write_grib(args, analysistime, forecasttime, output)
 
-    #diff = output #- background[0]
-    #mpl.pcolormesh(lons, lats, diff, cmap="RdBu_r", vmin=-2, vmax=2)
-    #mpl.xlim(0, 35)
-    #mpl.ylim(55, 75)
-    #mpl.gca().set_aspect(2)
-    #mpl.savefig('diff' + args.parameter + '.png')
-    #mpl.show()
+    """
+    # plot diff
+    for j in range(0,len(diff)):
+        vmin = -5
+        vmax = 5
+        if args.parameter == "humidity":
+             vmin, vmax = -50, 50
+        mpl.pcolormesh(lons, lats, diff[j], cmap="RdBu_r", vmin=vmin, vmax=vmax)
+        mpl.xlim(0, 35)
+        mpl.ylim(55, 75)
+        mpl.gca().set_aspect(2)
+        mpl.savefig('diff' + args.parameter + str(j) + '.png')
+        #mpl.show()
+
+    for k in range(0,len(output)):
+        vmin = np.min(output[k])
+        vmax = np.max(output[k])
+        mpl.pcolormesh(lons, lats, output[k], cmap="RdBu_r", vmin=vmin, vmax=vmax)
+        mpl.xlim(0, 35)
+        mpl.ylim(55, 75)
+        mpl.gca().set_aspect(2)
+        mpl.savefig('output' + args.parameter + str(k) + '.png')
+        #mpl.show()
+    """
     if args.plot:
-        plot(obs, background[0], output, lons, lats, args)
+        plot(obs, background, output, diff, lons, lats, args)
 
 
-def plot(obs, background, output, lons, lats, args):
+def plot(obs, background, output, diff, lons, lats, args):
     import matplotlib.pyplot as plt
 
-    vmin = min(np.min(background), np.min(output), np.min(obs[args.parameter]))
-    vmax = min(np.max(background), np.max(output), np.max(obs[args.parameter]))
+    vmin1 = -5
+    vmax1 = 5
+    if args.parameter == "temperature":
+        obs_parameter = "TA_PT1M_AVG"
+        output = list(map(lambda x: x - 273.15, output))
+    elif args.parameter == "windspeed":
+        obs_parameter = "WSP_PT10M_AVG"
+    elif args.parameter == "gust":
+        obs_parameter = "WG_PT1H_MAX"
+    elif args.parameter == "humidity":
+        obs_parameter = "RH_PT1M_AVG"
+        output = np.multiply(output,100)
+        vmin1 = -30
+        vmax1 = 30
 
-    plt.figure(figsize=(13, 6), dpi=80)
+    vmin = min(np.amin(background), np.amin(output))
+    vmax = min(np.amax(background), np.amax(output))
 
-    plt.subplot(1, 3, 1)
-    plt.pcolormesh(
-        np.asarray(lons),
-        np.asarray(lats),
-        background,
-        cmap="RdBu_r",
-        vmin=vmin,
-        vmax=vmax,
-    )
+    #vmin1 =  np.amin(diff)
+    #vmax1 =  np.amax(diff)
 
-    plt.xlim(0, 35)
-    plt.ylim(55, 75)
-    cbar = plt.colorbar(label="temperature (background)", orientation="horizontal")
+    for k in range(0,len(diff)):
+        plt.figure(figsize=(13, 6), dpi=80)
 
-    plt.subplot(1, 3, 2)
-    plt.scatter(
+        plt.subplot(1, 3, 1)
+        plt.pcolormesh(
+            np.asarray(lons),
+            np.asarray(lats),
+            background[k+1],
+            cmap= "Spectral_r", # "RdBu_r",
+            vmin=vmin,
+            vmax=vmax,
+        )
+
+        plt.xlim(0, 35)
+        plt.ylim(55, 75)
+        cbar = plt.colorbar(label= "MNWC " + str(k) + "h " + args.parameter , orientation="horizontal")
+
+        plt.subplot(1, 3, 2)
+        plt.pcolormesh(
+            np.asarray(lons),
+            np.asarray(lats),
+            diff[k],
+            cmap="RdBu_r",
+            vmin=vmin1,
+            vmax=vmax1,
+        )
+
+        """
+        plt.scatter(
         obs["longitude"],
         obs["latitude"],
         s=10,
-        c=obs[args.parameter],
+        c=obs[obs_parameter],
         cmap="RdBu_r",
         vmin=vmin,
         vmax=vmax,
-    )
-    plt.xlim(0, 35)
-    plt.ylim(55, 75)
-    cbar = plt.colorbar(label="temperature (points)", orientation="horizontal")
+        )
+        """
+        plt.xlim(0, 35)
+        plt.ylim(55, 75)
+        cbar = plt.colorbar(label= "Diff " + str(k) + "h " + args.parameter , orientation="horizontal")
 
-    plt.subplot(1, 3, 3)
-    plt.pcolormesh(
-        np.asarray(lons), np.asarray(lats), output, cmap="RdBu_r", vmin=vmin, vmax=vmax
-    )
+        plt.subplot(1, 3, 3)
+        plt.pcolormesh(
+        np.asarray(lons), np.asarray(lats), output[k], cmap="Spectral_r", vmin=vmin, vmax=vmax
+        )
 
-    plt.xlim(0, 35)
-    plt.ylim(55, 75)
-    cbar = plt.colorbar(
-        label="temperature (optimal interpolation)", orientation="horizontal"
-    )
+        plt.xlim(0, 35)
+        plt.ylim(55, 75)
+        cbar = plt.colorbar(
+            label= "XGB " + str(k) + "h " + args.parameter , orientation="horizontal"
+        )
 
-    plt.show()
+        #plt.show()
+        plt.savefig('all_' + args.parameter + str(k) + '.png')
 
 
 if __name__ == "__main__":
