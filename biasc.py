@@ -193,7 +193,7 @@ def read_grib(gribfile, read_coordinates=False):
 
 def read_grid(args):
     """Top function to read "all" gridded data"""
-    # Define the grib-file used as backgroun/"parameter_data"
+    # Define the grib-file used as background/"parameter_data"
     if args.parameter == "temperature":
         parameter_data = args.t2_data
     elif args.parameter == "windspeed":
@@ -293,6 +293,7 @@ def read_conventional_obs(args, fcstime, mnwc):
         write_grib(args, analysistime, fcstime, mnwc)
         sys.exit(1)
 
+    #print(obs.head(5))
     print("min obs:",min(obs.iloc[:,5]))
     print("max obs:",max(obs.iloc[:,5]))
     return obs
@@ -357,6 +358,13 @@ def read_netatmo_obs(args, fcstime):
         obs["elevation"] = interp(points)
 
         obs = obs.drop(columns=["x", "y"])
+        #print(obs.head(5))
+        # reorder/rename columns of the NetAtmo df to match with synop data
+        obs = obs[['station_id', 'longitude', 'latitude', 'utctime', 'elevation', 'temperature']]
+        obs.rename(columns = {'temperature':'TA_PT1M_AVG'}, inplace = True)
+        #print(obs.head(10))
+        print("min NetAtmo obs:",min(obs.iloc[:,5]))
+        print("max NetAtmo obs:",max(obs.iloc[:,5]))
 
     return obs
 
@@ -371,14 +379,15 @@ def read_obs(args, fcstime, grid, lc, mnwc):
 
     # for temperature we also have netatmo stations
     # these are optional
-    """
+
+
     if args.parameter == "temperature":
         netatmo = read_netatmo_obs(args, fcstime)
         if netatmo is not None:
             obs = pd.concat((obs, netatmo))
 
         #obs["temperature"] += 273.15
-    """
+
     points1 = gridpp.Points(
         obs["latitude"].to_numpy(),
         obs["longitude"].to_numpy(),
@@ -498,7 +507,7 @@ def interpolate(grid, points, background, obs, args, lc):
 
     # Barnes structure function with horizontal decorrelation length 100km,
     # vertical decorrelation length 200m
-    structure = gridpp.BarnesStructure(30000, 200, 1)
+    structure = gridpp.BarnesStructure(30000, 200, 0.5)
 
     # Include at most this many "observation points" when interpolating to a grid point
     max_points = 20
@@ -509,7 +518,7 @@ def interpolate(grid, points, background, obs, args, lc):
 
     for j in range(0,len(obs)):
         tmp_obs = obs[j]
-        print("min:",round(min(tmp_obs["biasc"]),0), "max:", round(max(tmp_obs["biasc"]),0))
+        print("min_points:",round(min(tmp_obs["biasc"]),1), "max_points:", round(max(tmp_obs["biasc"]),1))
 
     # perform optimal interpolation
         tmp_output = gridpp.optimal_interpolation(
@@ -526,7 +535,7 @@ def interpolate(grid, points, background, obs, args, lc):
         # Mask based on LSM(lc) so that modifications over sea are zero
         ###xo = ma.masked_array(tmp_output, mask = lc0)
         ###tmp_output = xo.filled(0)
-        print("min_op",round(np.amin(tmp_output),0), "max_op:", round(np.amax(tmp_output),0))
+        print("min_grid",round(np.amin(tmp_output),1), "max_grid:", round(np.amax(tmp_output),1))
 
         output.append(tmp_output)
     return output
@@ -615,7 +624,6 @@ def modify(data, param):
 # Calculate ml model point forecast
 def ml_forecast(ml_data, param):
     # Load model from S3, I'm unable to make it happen tough...
-    filen = "/snwc_ml_correction/"  #"/data/hietal/"
     if param == "temperature":
         mlname = "T2m"
     elif param == "windspeed":
@@ -625,7 +633,7 @@ def ml_forecast(ml_data, param):
     elif param == "humidity":
         mlname = "RH"
 
-    regressor = joblib.load(filen + 'xgb_' + mlname + '_tuned.joblib') 
+    regressor = joblib.load('xgb_' + mlname + '_tuned23.joblib') 
 
     # Check that you have all the leadtimes (0-9)
     ajat = sorted(ml_data['leadtime'].unique().tolist())
@@ -672,7 +680,7 @@ def main():
     ws, rh, t2, wg, cl, ps, wd, q2 = read_ml_grid(args)
     et = time.time()
     timedif = et-st
-    print('Reading NWP data for', args.parameter, 'takes:', round(timedif,0), 'seconds')
+    print('Reading NWP data for', args.parameter, 'takes:', round(timedif,1), 'seconds')
 
     # Read observations from smartmet server
     # Use correct time! == latest obs hour ==  forecasttime[1]
@@ -681,7 +689,7 @@ def main():
 
     ot = time.time()
     timedif = ot-et
-    print('Reading OBS data takes:', round(timedif,0) , 'seconds')
+    print('Reading OBS data takes:', round(timedif,1) , 'seconds')
     # prepare dataframe for ML code, pandas df
     data = train_data(args, points, obs, grid, topo, ws, rh, t2, wg, cl, ps, wd, q2, forecasttime)
 
@@ -692,12 +700,12 @@ def main():
     ml_fcst = ml_forecast(ml_data, args.parameter)
     mlt = time.time()
     timedif = mlt-ot
-    print('Producing ML forecasts takes:', round(timedif,0) , 'seconds')
+    print('Producing ML forecasts takes:', round(timedif,1) , 'seconds')
     # Interpolate ML point forecasts for bias correction + 0h analysis time
     diff = interpolate(grid, points, background0[0], ml_fcst, args, lc)
     oit = time.time()
     timedif = oit-mlt
-    print('Interpolating forecasts takes:', round(timedif,0) , 'seconds')
+    print('Interpolating forecasts takes:', round(timedif,1) , 'seconds')
     # calculate the final bias corrected forecast fields: MNWC - bias_correction
     # and convert parameter to T-K or RH-0TO1
     output = []
