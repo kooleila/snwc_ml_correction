@@ -115,7 +115,7 @@ def read_file_from_s3(grib_file):
     uri = "simplecache::{}".format(grib_file)
 
     return fsspec.open_local(
-        uri, s3={"anon": True, "client_kwargs": {"endpoint_url": "https://routines-data.lake.fmi.fi"}}
+        uri, s3={"anon": True, "client_kwargs": {"endpoint_url": "https://lake.fmi.fi"}}
     )
 
 
